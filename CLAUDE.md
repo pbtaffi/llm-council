@@ -23,16 +23,19 @@ LLM Council is a 3-stage deliberation system where multiple LLMs collaboratively
 - Graceful degradation: returns None on failure, continues with successful responses
 
 **`council.py`** - The Core Logic
-- `stage1_collect_responses()`: Parallel queries to all council models
+- `build_conversation_history()`: Converts stored messages to chat format for multi-turn context. Uses Stage 3 (chairman synthesis) as the assistant response in history.
+- `stage1_collect_responses()`: Parallel queries to all council models. Accepts optional `conversation_history` for multi-turn support.
 - `stage2_collect_rankings()`:
   - Anonymizes responses as "Response A, B, C, etc."
   - Creates `label_to_model` mapping for de-anonymization
   - Prompts models to evaluate and rank (with strict format requirements)
+  - Includes conversation context in prompt for follow-up questions
   - Returns tuple: (rankings_list, label_to_model_dict)
   - Each ranking includes both raw text and `parsed_ranking` list
-- `stage3_synthesize_final()`: Chairman synthesizes from all responses + rankings
+- `stage3_synthesize_final()`: Chairman synthesizes from all responses + rankings. Includes conversation history for context-aware synthesis.
 - `parse_ranking_from_text()`: Extracts "FINAL RANKING:" section, handles both numbered lists and plain format
 - `calculate_aggregate_rankings()`: Computes average rank position across all peer evaluations
+- `run_full_council()`: Orchestrates all 3 stages, accepts optional `conversation_history` and passes it to all stages
 
 **`storage.py`**
 - JSON-based conversation storage in `data/conversations/`
@@ -56,6 +59,7 @@ LLM Council is a 3-stage deliberation system where multiple LLMs collaboratively
 - Multiline textarea (3 rows, resizable)
 - Enter to send, Shift+Enter for new line
 - User messages wrapped in markdown-content class for padding
+- Input form always visible for multi-turn conversations (placeholder text changes for follow-ups)
 
 **`components/Stage1.jsx`**
 - Tab view of individual model responses
@@ -109,6 +113,16 @@ This strict format allows reliable parsing while still getting thoughtful evalua
 - Users can verify system's interpretation of model outputs
 - This builds trust and allows debugging of edge cases
 
+### Multi-turn Conversations
+- Conversation history is extracted from stored messages before each new query
+- Stage 3 (chairman synthesis) responses are used as the "assistant" turns in history
+- All three stages receive conversation context for follow-up questions:
+  - Stage 1: Models receive full chat history as message context
+  - Stage 2: Ranking prompt includes "CONVERSATION CONTEXT" section
+  - Stage 3: Chairman prompt includes "CONVERSATION HISTORY" section
+- Prompts adapt language for follow-ups (e.g., "Current Follow-up Question" vs "Original Question")
+- History is built fresh from storage on each request (not cached)
+
 ## Important Implementation Details
 
 ### Relative Imports
@@ -131,6 +145,7 @@ Models are hardcoded in `backend/config.py`. Chairman can be same or different f
 2. **CORS Issues**: Frontend must match allowed origins in `main.py` CORS middleware
 3. **Ranking Parse Failures**: If models don't follow format, fallback regex extracts any "Response X" patterns in order
 4. **Missing Metadata**: Metadata is ephemeral (not persisted), only available in API responses
+5. **Multi-turn Token Limits**: Long conversations can exceed model context windows. Currently no summarization—history grows unbounded. Watch for failures on very long conversations.
 
 ## Future Enhancement Ideas
 
@@ -140,6 +155,8 @@ Models are hardcoded in `backend/config.py`. Chairman can be same or different f
 - Model performance analytics over time
 - Custom ranking criteria (not just accuracy/insight)
 - Support for reasoning models (o1, etc.) with special handling
+- Long-term memory: User profile or auto-extracted facts persisted across conversations
+- Context summarization for very long multi-turn conversations (to manage token limits)
 
 ## Testing Notes
 
@@ -148,19 +165,23 @@ Use `test_openrouter.py` to verify API connectivity and test different model ide
 ## Data Flow Summary
 
 ```
-User Query
+User Query (new or follow-up)
     ↓
-Stage 1: Parallel queries → [individual responses]
+Extract conversation history from stored messages
     ↓
-Stage 2: Anonymize → Parallel ranking queries → [evaluations + parsed rankings]
+Stage 1: Parallel queries + history context → [individual responses]
+    ↓
+Stage 2: Anonymize → Parallel ranking queries + history context → [evaluations + parsed rankings]
     ↓
 Aggregate Rankings Calculation → [sorted by avg position]
     ↓
-Stage 3: Chairman synthesis with full context
+Stage 3: Chairman synthesis with full context + history
     ↓
 Return: {stage1, stage2, stage3, metadata}
     ↓
 Frontend: Display with tabs + validation UI
+    ↓
+Store assistant message (Stage 3 becomes history for next turn)
 ```
 
 The entire flow is async/parallel where possible to minimize latency.
